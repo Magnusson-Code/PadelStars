@@ -1,0 +1,1310 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <title>Padel</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #07111e; overflow: hidden; }
+    canvas { display: block; touch-action: none; }
+    #small-screen-msg {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: #07111e;
+      color: #7ec8e3;
+      font-family: system-ui, sans-serif;
+      font-size: 1rem;
+      text-align: center;
+      padding: 40px 20px;
+      z-index: 10;
+    }
+  </style>
+</head>
+<body>
+
+<div id="small-screen-msg">
+  Vrid enheten till liggande läge<br>eller använd en bredare skärm (min 400 px).
+</div>
+
+<canvas id="gameCanvas"></canvas>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+// PADEL – ETAPP 1 + 2 + 3
+//
+// Koordinatsystem: top-down, rak ovanifrån.
+//   Origo (0,0) = övre vänstra hörnet av canvas.
+//   X växer åt höger, Y växer nedåt.
+//
+// Bana: 20 m × 10 m → 2:1-proportion, längsriktning längs X.
+//   Spelare 1 = vänstra halvan, Spelare 2 = högra halvan.
+//   Nätet är en vertikal linje exakt i mitten (netX).
+// ═══════════════════════════════════════════════════════════════════════════
+
+
+// ── Canvas och kontext ────────────────────────────────────────────────────
+
+const canvas = document.getElementById('gameCanvas');
+const ctx    = canvas.getContext('2d');
+const msg    = document.getElementById('small-screen-msg');
+
+// ── Spelarbilder ───────────────────────────────────────────────────────────
+// Bilder laddas asynkront; ritning sker automatiskt när de är redo.
+const playerImages = [new Image(), new Image()];
+playerImages[0].src = 'Bilder/Mona.png';
+playerImages[1].src = 'Bilder/Stefan.png';
+
+
+// ── Konstanter ────────────────────────────────────────────────────────────
+
+const PAD           = 10;    // Marginal runt banan (px)
+const COURT_M_LEN   = 20;    // Banans längd i meter
+const COURT_M_WID   = 10;    // Banans bredd i meter
+const SERVE_LINE_M  = 6.95;  // Servlinjens avstånd från nätet (m)
+const LERP          = 0.18;  // Rörelsetröghet: 0 = stillastående, 1 = direkt
+
+// ── Bollfysik-konstanter ──────────────────────────────────────────────────
+//
+// Bollen rör sig i 2D (x, y). Ingen höjd – en enda nivå.
+// Hastigheter mäts i pixlar/frame.
+//
+const BOUNCE_WALL  = 0.92;   // andel av fart som behålls vid vägg-/bakväggsstuds
+const BALL_MAX_SPD = 22;     // max fart i px/frame
+
+// ── Slagkonstanter ────────────────────────────────────────────────────────
+const HIT_COOLDOWN = 22;     // frames innan samma spelare kan slå igen
+const BALL_BASE_F  = 0.009;  // minsta slagfart = court.w × denna faktor
+const SWING_FACTOR = 1.6;    // spelarens fart × detta läggs till slagfarten
+
+// Dessa räknas om i resize():
+let SB_H   = 54;
+let HDR_H  = 14;
+let WALL_T = 8;
+
+
+// ── Spelstate ─────────────────────────────────────────────────────────────
+
+let W = 0, H = 0;   // canvas-storlek
+
+// Banans koordinater (uppdateras i resize)
+let court = { x:0, y:0, w:0, h:0, netX:0, midY:0, srv1X:0, srv2X:0 };
+
+// ── Spelarnamn ────────────────────────────────────────────────────────────
+const PLAYER_NAMES = ['Mona', 'Stefan'];
+
+// ── Spelstate / poängräkning ──────────────────────────────────────────────
+//
+// phase: 'normal' | 'deuce' | 'adv0' | 'adv1'
+// serveFromRight: true = deuce court, false = advantage court
+// ptsInGame: antal poäng spelade i nuvarande game (styr serve-sida)
+// tbTotalPts: totalt antal poäng spelade i tiebreak (styr serve-rotation)
+// flashTimer: frames kvar för poänganimation; flashBig = stor text
+
+const scoring = {
+  pts:           [0, 0],     // poäng i nuv. game (0=love,1=15,2=30,3=40)
+  phase:         'normal',
+  gems:          [0, 0],     // game vunna i nuv. set
+  setsWon:       [0, 0],     // set vunna totalt
+  setHistory:    [],          // [{ p0, p1 }, ...] per avslutat set
+  serverIdx:     0,           // vem servar nu (0=Mona, 1=Stefan)
+  serveFromRight: true,       // true = deuce court (höger)
+  ptsInGame:     0,
+  tiebreak:      false,
+  tbPts:         [0, 0],
+  tbTotalPts:    0,
+  tbFirstServer: 0,
+  matchOver:     false,
+  winner:        -1,
+  flashMsg:      '',
+  flashTimer:    0,
+  flashBig:      false,
+};
+
+// ── Spelardata ────────────────────────────────────────────────────────────
+//
+// Varje spelare har:
+//   x, y         – position på canvas (px)
+//   vx, vy       – aktuell hastighet (px/frame)
+//   tvx, tvy     – målhastighet som lerp:as mot (sätts av input)
+//   angle        – vinkeln racket pekar åt (radianer, 0 = höger/åt +X)
+//   side         – 'left' (sp.1) eller 'right' (sp.2), styr kollisionsgränser
+//   color        – fyllnadsfärg på cirkeln
+//   racketColor  – färg på racketen
+//   hitCooldown  – frames kvar innan spelaren kan slå igen (räknas ned varje frame)
+
+const players = [
+  {
+    x: 0, y: 0, vx: 0, vy: 0, tvx: 0, tvy: 0,
+    angle: 0,          // pekar mot nätet (höger) som default
+    side:  'left',
+    color: '#e63946',  // röd – syns tydligt mot blå bana
+    racketColor: '#ff9aa2',
+    hitCooldown: 0,
+  },
+  {
+    x: 0, y: 0, vx: 0, vy: 0, tvx: 0, tvy: 0,
+    angle: Math.PI,    // pekar mot nätet (vänster) som default
+    side:  'right',
+    color: '#ffd166',  // gul
+    racketColor: '#ffe8a0',
+    hitCooldown: 0,
+  },
+];
+
+// Räknar ut spelararadien baserat på aktuell banstorlek
+function playerRadius() { return Math.round(court.h * 0.068); }
+
+// Placerar spelarna i sina respektive halvors centrum
+function initPlayers() {
+  const { x, y, w, h } = court;
+  players[0].x = x + w * 0.25;   players[0].y = y + h / 2;
+  players[1].x = x + w * 0.75;   players[1].y = y + h / 2;
+  players[0].vx = players[0].vy = players[0].tvx = players[0].tvy = 0;
+  players[1].vx = players[1].vy = players[1].tvx = players[1].tvy = 0;
+}
+
+let playersReady = false;   // sätts true efter första initPlayers()
+
+
+// ── Bollstate ─────────────────────────────────────────────────────────────
+//
+// x, y     – position på banytan i pixlar
+// vx, vy   – hastighet (px/frame)
+// lastHit  – index på spelare som senast slog (0/1/-1)
+// returned – true om den spelare vars halva bollen är på har slagit den
+//            (används för att avgöra om ett poäng ska tilldelas vid nätkorsning)
+// inPlay   – false = bollen är ur spel (poäng just avgjort)
+
+const ball = {
+  x: 0, y: 0,
+  vx: 0, vy: 0,
+  lastHit: -1,
+  returned: true,  // true vid serve (servaren har "slagit" den)
+  inPlay: false,
+};
+
+// Startar/återstartar bollen på serverarens halva för testning
+// Placerar bollen och spelaren på rätt serve-position och startar auto-serve.
+// Serve-sidan (deuce/advantage court) styrs av scoring.serveFromRight.
+function initServe() {
+  if (scoring.matchOver) return;
+
+  const { x, y, w, h, netX, midY, srv1X, srv2X } = court;
+  const srv   = scoring.serverIdx;
+  const right = scoring.serveFromRight;   // true = deuce court
+  const br    = ballRadius();
+  const pr    = playerRadius();
+
+  // ── Startposition och serve-mål ─────────────────────────────────────────
+  // Spelare 0 (vänster): baseline = court.x
+  //   Deuce court (right=true)  → nedre halvan, slår diagonalt till P1:s övre box
+  //   Advantage court (right=false) → övre halvan, slår diagonalt till P1:s nedre box
+  // Spelare 1 (höger): baseline = court.x + court.w
+  //   Deuce court → övre halvan, slår diagonalt till P0:s nedre box
+  //   Advantage court → nedre halvan, slår diagonalt till P0:s övre box
+
+  let bx, by, targetX, targetY;
+
+  if (srv === 0) {
+    bx      = x + br * 3;
+    by      = right ? y + h * 0.75 : y + h * 0.25;
+    targetX = (srv2X + x + w) / 2;
+    targetY = right ? (y + midY) / 2 : (midY + y + h) / 2;
+  } else {
+    bx      = x + w - br * 3;
+    by      = right ? y + h * 0.25 : y + h * 0.75;
+    targetX = (x + srv1X) / 2;
+    targetY = right ? (midY + y + h) / 2 : (y + midY) / 2;
+  }
+
+  ball.x        = bx;
+  ball.y        = by;
+  ball.vx       = 0;
+  ball.vy       = 0;
+  ball.lastHit  = srv;
+  ball.returned = true;
+  ball.inPlay   = false;
+
+  // Flytta servaren till serve-positionen
+  players[srv].x = bx + (srv === 0 ? pr + br : -(pr + br));
+  players[srv].y = by;
+  players[srv].vx = players[srv].vy = 0;
+
+  // Auto-launch efter 1,5 s
+  setTimeout(() => {
+    if (scoring.matchOver) return;
+    const dx   = targetX - ball.x;
+    const dy   = targetY - ball.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    const spd  = court.w * 0.012;
+    ball.vx    = (dx / dist) * spd;
+    ball.vy    = (dy / dist) * spd;
+    ball.inPlay = true;
+  }, 1500);
+}
+
+// Fast bollradie – 2D, ingen höjdvariation
+function ballRadius() {
+  return Math.max(4, Math.round(court.h * 0.018));
+}
+
+// Debug-läge (tangent D)
+let debugMode = false;
+
+
+// ── Tangentbordsinput ─────────────────────────────────────────────────────
+//
+// keys-objektet håller reda på vilka knappar som är nertryckta just nu.
+// Vi kollar det varje frame i handleInput().
+
+const keys = {};
+const GAME_KEYS = new Set([
+  'w','a','s','d','W','A','S','D',
+  'ArrowUp','ArrowDown','ArrowLeft','ArrowRight',
+]);
+
+window.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if (GAME_KEYS.has(e.key)) e.preventDefault();
+  // D = växla debug-overlay
+  if (e.key === 'd' || e.key === 'D') debugMode = !debugMode;
+  // R = starta om matchen
+  if (e.key === 'r' || e.key === 'R') resetMatch();
+});
+window.addEventListener('keyup', e => { keys[e.key] = false; });
+
+
+// ── Touchinput ────────────────────────────────────────────────────────────
+//
+// Varje touch spåras via sitt identifier.
+// Beroende på var touchen startade (vänster/höger halva av skärmen)
+// kopplas den till spelare 0 eller 1.
+//
+// Vi sparar senaste koordinat och beräknar delta (förflyttning) per frame.
+
+const activeTouches = {};   // touchIdentifier → { lastX, lastY, playerIdx }
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    // Vilken halva av skärmen? → vilken spelare?
+    const playerIdx = t.clientX < W / 2 ? 0 : 1;
+    activeTouches[t.identifier] = {
+      lastX: t.clientX,
+      lastY: t.clientY,
+      playerIdx,
+    };
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    const rec = activeTouches[t.identifier];
+    if (!rec) continue;
+
+    // Hur långt har fingret rört sig sedan sist?
+    const dx = t.clientX - rec.lastX;
+    const dy = t.clientY - rec.lastY;
+    rec.lastX = t.clientX;
+    rec.lastY = t.clientY;
+
+    // Flytta spelaren direkt med fingrets delta (1:1 med skärmen)
+    const p = players[rec.playerIdx];
+    p.x += dx;
+    p.y += dy;
+
+    // Uppdatera rackelvinkeln i rörelseriktningen
+    if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+      p.angle = Math.atan2(dy, dx);
+    }
+
+    // Klämma direkt vid touch (inte vänta till nästa frame)
+    clampPlayer(p);
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchend',    handleTouchEnd);
+canvas.addEventListener('touchcancel', handleTouchEnd);
+function handleTouchEnd(e) {
+  for (const t of e.changedTouches) delete activeTouches[t.identifier];
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RESIZE
+// ═══════════════════════════════════════════════════════════════════════════
+
+function resize() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width  = W;
+  canvas.height = H;
+
+  msg.style.display = W < 400 ? 'block' : 'none';
+
+  // Scoreboard och vägg skalas med skärmbredden
+  SB_H   = Math.round(Math.min(Math.max(46, W * 0.092), 98));
+  HDR_H  = Math.round(SB_H * 0.26);
+  WALL_T = Math.round(Math.min(Math.max(5, W * 0.007), 14));
+
+  // Beräkna banstorlek med 2:1-proportion
+  const availW = W - PAD * 2;
+  const availH = H - SB_H - PAD * 2;
+  let cW, cH;
+  if (availW / 2 <= availH) { cW = availW; cH = availW / 2; }
+  else                       { cH = availH; cW = availH * 2; }
+
+  const cX   = Math.round((W - cW) / 2);
+  const cY   = Math.round(SB_H + (availH - cH) / 2 + PAD);
+  const srvPx = (SERVE_LINE_M / COURT_M_WID) * (cW / 2);
+
+  court = {
+    x: cX, y: cY, w: cW, h: cH,
+    netX:  cX + cW / 2,
+    midY:  cY + cH / 2,
+    srv1X: cX + cW/2 - srvPx,
+    srv2X: cX + cW/2 + srvPx,
+  };
+
+  if (!playersReady) {
+    initPlayers();
+    initServe();
+    playersReady = true;
+  } else {
+    players.forEach(clampPlayer);
+    // Klämma bollens position inom banan vid resize
+    ball.x = Math.max(court.x, Math.min(court.x + court.w, ball.x));
+    ball.y = Math.max(court.y, Math.min(court.y + court.h, ball.y));
+  }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GAME LOOP
+// ═══════════════════════════════════════════════════════════════════════════
+
+function gameLoop() {
+  handleInput();
+  updatePlayers();
+  checkHits();       // ← nytt i etapp 4
+  updateBall();
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+
+// ── Input ─────────────────────────────────────────────────────────────────
+//
+// Konverterar nedtryckta tangenter till målhastighet (tvx/tvy).
+// Diagonal rörelse normaliseras till samma fart som rak rörelse.
+
+function handleInput() {
+  const speed = court.h * 0.014;   // max pixlar per frame (skalas med banan)
+
+  // Spelare 1 – WASD
+  let dx1 = 0, dy1 = 0;
+  if (keys['a'] || keys['A']) dx1 -= 1;
+  if (keys['d'] || keys['D']) dx1 += 1;
+  if (keys['w'] || keys['W']) dy1 -= 1;
+  if (keys['s'] || keys['S']) dy1 += 1;
+  setTargetVel(players[0], dx1, dy1, speed);
+
+  // Spelare 2 – piltangenter
+  let dx2 = 0, dy2 = 0;
+  if (keys['ArrowLeft'])  dx2 -= 1;
+  if (keys['ArrowRight']) dx2 += 1;
+  if (keys['ArrowUp'])    dy2 -= 1;
+  if (keys['ArrowDown'])  dy2 += 1;
+  setTargetVel(players[1], dx2, dy2, speed);
+}
+
+// Normaliserar riktning och sätter tvx/tvy
+function setTargetVel(p, dx, dy, speed) {
+  if (dx === 0 && dy === 0) {
+    p.tvx = 0;
+    p.tvy = 0;
+    return;
+  }
+  // Normalisering: diagonal ska inte vara snabbare än rak rörelse
+  const len = Math.sqrt(dx*dx + dy*dy);
+  p.tvx = (dx / len) * speed;
+  p.tvy = (dy / len) * speed;
+}
+
+
+// ── Uppdatera spelare ─────────────────────────────────────────────────────
+
+function updatePlayers() {
+  const speed = court.h * 0.014;
+
+  players.forEach(p => {
+    // Lerp: hastigheten glider mjukt mot målet
+    // Detta ger en känsla av tröghet/acceleration
+    p.vx += (p.tvx - p.vx) * LERP;
+    p.vy += (p.tvy - p.vy) * LERP;
+
+    // Uppdatera position
+    p.x += p.vx;
+    p.y += p.vy;
+
+    // Uppdatera rackelvinkel om spelaren rör sig
+    const movingSpeed = Math.sqrt(p.vx*p.vx + p.vy*p.vy);
+    if (movingSpeed > speed * 0.1) {
+      p.angle = Math.atan2(p.vy, p.vx);
+    }
+    // Om spelaren är stilla: peka mot nätet (sp1 höger, sp2 vänster)
+    else if (movingSpeed < speed * 0.02) {
+      const targetAngle = p.side === 'left' ? 0 : Math.PI;
+      // Mjuk rotation tillbaka till vilolägget
+      p.angle += (targetAngle - p.angle) * 0.05;
+    }
+
+    // Kollision med väggar och nät
+    clampPlayer(p);
+  });
+}
+
+// Håller spelaren innanför sin halva och banans väggar
+function clampPlayer(p) {
+  const r  = playerRadius();
+  const { x, y, w, h, netX } = court;
+
+  // X-gränser beror på vilken halva spelaren tillhör
+  const minX = p.side === 'left'  ? x + r       : netX + r;
+  const maxX = p.side === 'left'  ? netX - r     : x + w - r;
+
+  p.x = Math.max(minX, Math.min(maxX, p.x));
+  p.y = Math.max(y + r, Math.min(y + h - r, p.y));
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DRAW
+// ═══════════════════════════════════════════════════════════════════════════
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawBackground();
+  drawCourt();
+  drawPlayers();
+  drawBall();         // bollen ovanpå spelarna
+  drawScoreboard();
+  drawFlashMessage();
+  if (debugMode) drawDebug();
+}
+
+function drawBackground() {
+  ctx.fillStyle = '#07111e';
+  ctx.fillRect(0, 0, W, H);
+}
+
+
+// ── Bana ──────────────────────────────────────────────────────────────────
+
+function drawCourt() {
+  const { x, y, w, h, netX, midY, srv1X, srv2X } = court;
+
+  // Väggram
+  ctx.fillStyle = '#0a1e35';
+  ctx.fillRect(x - WALL_T, y - WALL_T, w + WALL_T*2, h + WALL_T*2);
+
+  // Streckad glaskontur
+  ctx.save();
+  ctx.setLineDash([8, 6]);
+  ctx.strokeStyle = 'rgba(100, 190, 255, 0.55)';
+  ctx.lineWidth = 1.2;
+  ctx.strokeRect(x - WALL_T*0.5, y - WALL_T*0.5, w + WALL_T, h + WALL_T);
+  ctx.restore();
+
+  // Yttre ram
+  ctx.setLineDash([]);
+  ctx.strokeStyle = '#1a4070';
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(x - WALL_T, y - WALL_T, w + WALL_T*2, h + WALL_T*2);
+
+  // Banytan
+  ctx.fillStyle = '#1565b8';
+  ctx.fillRect(x, y, w, h);
+
+  // Linjer
+  const lw = Math.max(1, w / 360);
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+  ctx.lineWidth = lw;
+  ctx.setLineDash([]);
+  ctx.strokeRect(x, y, w, h);
+  verticalLine(srv1X, y, h);
+  verticalLine(srv2X, y, h);
+  horizontalLine(midY, srv1X, netX);
+  horizontalLine(midY, netX, srv2X);
+
+  drawNet(netX, y, h);
+}
+
+function verticalLine(x, top, height) {
+  ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, top + height); ctx.stroke();
+}
+function horizontalLine(y, x1, x2) {
+  ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x2, y); ctx.stroke();
+}
+
+function drawNet(x, top, height) {
+  ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+  ctx.lineWidth = 5;
+  ctx.setLineDash([]);
+  ctx.beginPath(); ctx.moveTo(x+1, top+2); ctx.lineTo(x+1, top+height+2); ctx.stroke();
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, top+height); ctx.stroke();
+  ctx.lineWidth = 1.5;
+  [[top,5],[top+height,5],[top+height/2,3]].forEach(([ty,sz]) => {
+    ctx.beginPath(); ctx.moveTo(x-sz,ty); ctx.lineTo(x+sz,ty); ctx.stroke();
+  });
+}
+
+
+// ── Spelare ───────────────────────────────────────────────────────────────
+//
+// Varje spelare ritas som:
+//   1. Skugga under cirkeln (djupkänsla)
+//   2. Fylld cirkel (kroppen)
+//   3. Placeholder-ansikte (kan bytas mot bild)
+//   4. Racket – litet ovalt block i rörelseriktningen
+
+function drawPlayers() {
+  players.forEach(drawPlayer);
+}
+
+function drawPlayer(p) {
+  const r = playerRadius();
+
+  // 1. Skugga
+  ctx.save();
+  ctx.shadowColor   = 'rgba(0,0,0,0.5)';
+  ctx.shadowBlur    = r * 0.6;
+  ctx.shadowOffsetX = r * 0.15;
+  ctx.shadowOffsetY = r * 0.15;
+
+  // 2. Kropp (fylld cirkel)
+  ctx.fillStyle = p.color;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();   // nollställ skugga
+
+  // 3. Kant på cirkeln
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth   = Math.max(1, r * 0.08);
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // 4. Spelarfoto (klippt till cirkel); faller tillbaka på drawFace om bilden ej laddats
+  const imgIdx = players.indexOf(p);
+  const img    = playerImages[imgIdx];
+  if (img && img.complete && img.naturalWidth > 0) {
+    ctx.save();
+    // Bilden är 1.5× spelarradien → sticker ut bortom kroppen
+    const imgR = r * 1.5;
+    // Mjuk cirkulär klipp lite större än kroppen
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, imgR, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.drawImage(img, p.x - imgR, p.y - imgR, imgR * 2, imgR * 2);
+    ctx.restore();
+  } else {
+    drawFace(p.x, p.y, r, p.angle);
+  }
+
+  // 5. Racket (litet ovalt block utanför cirkeln i rörelseriktningen)
+  drawRacket(p);
+}
+
+// Enkelt animerat ansikte – placeholder tills en riktig bild läggs in
+function drawFace(cx, cy, r, angle) {
+  ctx.save();
+  // Klipp till cirkeln så inget ritas utanför
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 0.92, 0, Math.PI * 2);
+  ctx.clip();
+
+  // Ansiktet "tittar" i rörelseriktningen
+  // Vi roterar koordinatsystemet runt spelarens centrum
+  ctx.translate(cx, cy);
+  ctx.rotate(angle + Math.PI / 2);   // +90° för att "upp" = framåt
+
+  const fr = r * 0.55;   // ansiktets radie
+
+  // Vit bakgrund på ansiktet
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.beginPath();
+  ctx.arc(0, -r * 0.05, fr, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Ögon
+  ctx.fillStyle = '#222';
+  const eyeY  = -r * 0.18;
+  const eyeX  = fr * 0.35;
+  const eyeR  = r * 0.09;
+  ctx.beginPath(); ctx.arc(-eyeX, eyeY, eyeR, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc( eyeX, eyeY, eyeR, 0, Math.PI * 2); ctx.fill();
+
+  // Mun (halvcirkel)
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth   = r * 0.07;
+  ctx.lineCap     = 'round';
+  ctx.beginPath();
+  ctx.arc(0, r * 0.1, fr * 0.38, 0.1, Math.PI - 0.1);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+// Racket: klassisk padel-form sedd rakt uppifrån.
+// Runt svart huvud med vita hål i rutnät, rött grepp, smal hals emellan.
+function drawRacket(p) {
+  const r       = playerRadius();
+  const cos     = Math.cos(p.angle);
+  const sin     = Math.sin(p.angle);
+  const px      = -sin;            // vinkelrät axel (x-komponent)
+  const py      =  cos;            // vinkelrät axel (y-komponent)
+
+  // Dimensioner
+  const gripLen = r * 0.58;        // greppets längd
+  const gripW   = r * 0.21;        // greppets bredd
+  const headR   = r * 0.76;        // spelytans radie (nästan cirkulär)
+
+  // Positioner längs p.angle från spelarens kant
+  const gripMid  = r + gripLen * 0.5;
+  const headDist = r + gripLen + headR * 0.72;   // huvud centrum
+
+  const gcx = p.x + cos * gripMid;
+  const gcy = p.y + sin * gripMid;
+  const hcx = p.x + cos * headDist;
+  const hcy = p.y + sin * headDist;
+
+  // ── Hals (V/trapets som förbinder grepp och huvud) ─────────────────────
+  // Bredden ökar från gripW vid greppets topp till headR*0.6 vid huvudets nederkant
+  const throatDist = r + gripLen;
+  const tx0 = p.x + cos * throatDist;
+  const ty0 = p.y + sin * throatDist;
+  const tx1 = p.x + cos * (headDist - headR * 0.55);
+  const ty1 = p.y + sin * (headDist - headR * 0.55);
+  const tw0 = gripW * 0.9;
+  const tw1 = headR * 0.58;
+
+  ctx.fillStyle = '#111';
+  ctx.beginPath();
+  ctx.moveTo(tx0 + px * tw0, ty0 + py * tw0);
+  ctx.lineTo(tx1 + px * tw1, ty1 + py * tw1);
+  ctx.lineTo(tx1 - px * tw1, ty1 - py * tw1);
+  ctx.lineTo(tx0 - px * tw0, ty0 - py * tw0);
+  ctx.closePath();
+  ctx.fill();
+
+  // ── Grepp ─────────────────────────────────────────────────────────────
+  ctx.save();
+  ctx.translate(gcx, gcy);
+  ctx.rotate(p.angle);
+  // Lokalt koordinatsystem: +x = framåt (mot huvud)
+
+  // Svart underlag
+  ctx.fillStyle = '#0a0a0a';
+  roundRectPath(ctx, -gripLen/2, -gripW/2, gripLen, gripW, gripW * 0.45);
+  ctx.fill();
+
+  // Röd lindning – upprepad gradient som simulerar spiral-tejpen
+  const numBands = 8;
+  const bW = gripLen / numBands;
+  for (let i = 0; i < numBands; i++) {
+    const bx = -gripLen/2 + i * bW;
+    const rGrad = ctx.createLinearGradient(0, -gripW/2, 0, gripW/2);
+    rGrad.addColorStop(0,    '#5a0000');
+    rGrad.addColorStop(0.35, '#bb1100');
+    rGrad.addColorStop(0.65, '#ee3311');
+    rGrad.addColorStop(1,    '#5a0000');
+    ctx.fillStyle = rGrad;
+    roundRectPath(ctx, bx + 0.5, -gripW/2 + 1, bW - 1, gripW - 2, gripW * 0.3);
+    ctx.fill();
+  }
+
+  // Mörkare ränder mellan banden (lindningsdalar)
+  ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+  ctx.lineWidth   = 1.2;
+  for (let i = 1; i < numBands; i++) {
+    const lx = -gripLen/2 + i * bW;
+    ctx.beginPath();
+    ctx.moveTo(lx, -gripW/2 + 2);
+    ctx.lineTo(lx,  gripW/2 - 2);
+    ctx.stroke();
+  }
+
+  // Svart ändlock (butt cap)
+  ctx.fillStyle = '#111';
+  roundRectPath(ctx, -gripLen/2, -gripW/2, gripW * 0.6, gripW, gripW * 0.45);
+  ctx.fill();
+
+  ctx.restore();
+
+  // ── Spelyta (rund huvud) ───────────────────────────────────────────────
+  // Yttre svart ram
+  ctx.fillStyle   = '#111';
+  ctx.strokeStyle = '#2a2a2a';
+  ctx.lineWidth   = 1.5;
+  ctx.beginPath();
+  ctx.arc(hcx, hcy, headR, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  // Inre yta – mörkgrå med radial gradient (lite lyster)
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(hcx, hcy, headR * 0.87, 0, Math.PI * 2);
+  ctx.clip();
+
+  const fGrad = ctx.createRadialGradient(
+    hcx - headR * 0.25, hcy - headR * 0.25, 0,
+    hcx, hcy, headR
+  );
+  fGrad.addColorStop(0,   '#2e2e2e');
+  fGrad.addColorStop(0.7, '#181818');
+  fGrad.addColorStop(1,   '#101010');
+  ctx.fillStyle = fGrad;
+  ctx.fill();
+
+  // Vita hål i ett rutnät (inspirerat av padelracket.png)
+  ctx.fillStyle = 'rgba(255,255,255,0.88)';
+  const dotR    = headR * 0.068;
+  const spacing = headR * 0.295;
+  const cols = 5, rows = 6;
+
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      // Offset i lokalt plan: framåt/bakåt längs cos/sin, tvärs längs px/py
+      const lFwd  = (col - (cols - 1) / 2) * spacing;   // längs rörelseriktning
+      const lPerp = (row - (rows - 1) / 2) * spacing;   // tvärs
+      const wx = hcx + cos * lFwd + px * lPerp;
+      const wy = hcy + sin * lFwd + py * lPerp;
+      // Behåll bara hål som är innanför den inre ytan
+      const dx = wx - hcx, dy = wy - hcy;
+      if (dx * dx + dy * dy < (headR * 0.83) * (headR * 0.83)) {
+        ctx.beginPath();
+        ctx.arc(wx, wy, dotR, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  ctx.restore();
+
+  // Smal konturlinje runt spelytans yttre kant
+  ctx.strokeStyle = '#3a3a3a';
+  ctx.lineWidth   = 1;
+  ctx.beginPath();
+  ctx.arc(hcx, hcy, headR, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+// Hjälp: ritar en rundad rektangels path utan ctx.roundRect (iOS-kompatibelt)
+function roundRectPath(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y,     x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h,     x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y,         x + r, y);
+  ctx.closePath();
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// POÄNG
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Poänglogik ────────────────────────────────────────────────────────────
+
+function awardPoint(w) {
+  ball.inPlay = false;
+  scorePoint(w);
+}
+
+function flash(msg, big, frames) {
+  scoring.flashMsg   = msg;
+  scoring.flashBig   = big;
+  scoring.flashTimer = frames;
+}
+
+// Hanterar ett vunnet poäng i normalspel
+function scorePoint(w) {
+  if (scoring.tiebreak) { scoreTiebreak(w); return; }
+
+  const opp = 1 - w;
+
+  if (scoring.phase === 'deuce') {
+    scoring.phase = w === 0 ? 'adv0' : 'adv1';
+    flash('Advantage ' + PLAYER_NAMES[w], false, 90);
+  } else if (scoring.phase === 'adv0' || scoring.phase === 'adv1') {
+    const advPlayer = scoring.phase === 'adv0' ? 0 : 1;
+    if (w === advPlayer) {
+      gameWon(w); return;
+    } else {
+      scoring.phase = 'deuce';
+      flash('Deuce', false, 90);
+    }
+  } else {
+    // Normal poäng
+    scoring.pts[w]++;
+    if (scoring.pts[w] >= 4) { gameWon(w); return; }
+    if (scoring.pts[0] === 3 && scoring.pts[1] === 3) {
+      scoring.phase = 'deuce';
+      flash('Deuce', false, 90);
+    } else {
+      flash(ptsLabel(0) + ' – ' + ptsLabel(1), false, 70);
+    }
+  }
+
+  // Uppdatera serve-sida för nästa poäng
+  scoring.ptsInGame++;
+  scoring.serveFromRight = (scoring.ptsInGame % 2 === 0);
+  setTimeout(() => initServe(), 1200);
+}
+
+// Hanterar ett vunnet game
+function gameWon(w) {
+  const opp = 1 - w;
+  scoring.gems[w]++;
+  scoring.pts        = [0, 0];
+  scoring.phase      = 'normal';
+  scoring.ptsInGame  = 0;
+  scoring.serveFromRight = true;
+
+  // Tiebreak vid 6–6
+  if (scoring.gems[0] === 6 && scoring.gems[1] === 6) {
+    scoring.tiebreak      = true;
+    scoring.tbPts         = [0, 0];
+    scoring.tbTotalPts    = 0;
+    scoring.tbFirstServer = scoring.serverIdx;
+    flash('Tiebreak!', true, 120);
+    setTimeout(() => initServe(), 2200);
+    return;
+  }
+
+  // Set vunnet? (minst 6 game och 2 games försprång)
+  if (scoring.gems[w] >= 6 && (scoring.gems[w] - scoring.gems[opp]) >= 2) {
+    wonSet(w); return;
+  }
+
+  // Game vunnet, serven byter
+  scoring.serverIdx = opp;
+  flash('Game ' + PLAYER_NAMES[w] + '!  ' + scoring.gems[0] + '–' + scoring.gems[1], true, 120);
+  setTimeout(() => initServe(), 2000);
+}
+
+// Hanterar ett vunnet set
+function wonSet(w) {
+  const opp = 1 - w;
+  scoring.setHistory.push({ p0: scoring.gems[0], p1: scoring.gems[1] });
+  scoring.setsWon[w]++;
+  scoring.gems       = [0, 0];
+  scoring.tiebreak   = false;
+  scoring.tbPts      = [0, 0];
+  scoring.tbTotalPts = 0;
+
+  if (scoring.setsWon[w] >= 2) {
+    // Match vunnen!
+    scoring.matchOver = true;
+    scoring.winner    = w;
+    flash(PLAYER_NAMES[w] + ' vinner matchen! 🎉  Tryck R för ny match', true, 9999);
+    ball.inPlay = false;
+    return;
+  }
+
+  // Nytt set – serven byter
+  scoring.serverIdx      = opp;
+  scoring.serveFromRight = true;
+  flash('Set ' + PLAYER_NAMES[w] + '!', true, 130);
+  setTimeout(() => initServe(), 2200);
+}
+
+// Hanterar poäng i tiebreak
+function scoreTiebreak(w) {
+  const opp = 1 - w;
+  scoring.tbPts[w]++;
+  scoring.tbTotalPts++;
+
+  // Vinst: minst 7 poäng och 2 poängs försprång
+  if (scoring.tbPts[w] >= 7 && (scoring.tbPts[w] - scoring.tbPts[opp]) >= 2) {
+    wonSet(w); return;
+  }
+
+  // Serve-rotation: byt efter 1 poäng, sedan var 2:a
+  if ((scoring.tbTotalPts - 1) % 2 === 0) {
+    scoring.serverIdx = 1 - scoring.serverIdx;
+  }
+  // Serve-sida alternerar varje poäng i tiebreak
+  scoring.serveFromRight = (scoring.tbTotalPts % 2 === 0);
+
+  flash(scoring.tbPts[0] + ' – ' + scoring.tbPts[1], false, 60);
+  setTimeout(() => initServe(), 1200);
+}
+
+// Återstartar hela matchen
+function resetMatch() {
+  Object.assign(scoring, {
+    pts: [0,0], phase: 'normal',
+    gems: [0,0], setsWon: [0,0], setHistory: [],
+    serverIdx: 0, serveFromRight: true, ptsInGame: 0,
+    tiebreak: false, tbPts: [0,0], tbTotalPts: 0, tbFirstServer: 0,
+    matchOver: false, winner: -1, flashMsg: '', flashTimer: 0, flashBig: false,
+  });
+  players[0].hitCooldown = 0;
+  players[1].hitCooldown = 0;
+  initPlayers();
+  initServe();
+}
+
+// Hjälp: returnerar visningstext för poäng
+function ptsLabel(i) {
+  if (scoring.phase === 'deuce') return 'D';
+  if (scoring.phase === 'adv0')  return i === 0 ? 'A' : '';
+  if (scoring.phase === 'adv1')  return i === 1 ? 'A' : '';
+  return ['0','15','30','40'][scoring.pts[i]];
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SLAGLOGIK – ETAPP 4
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// En spelare slår bollen om:
+//   1. Avståndet spelare→boll ≤ playerRadius + ballRadius
+//   2. Spelarens hitCooldown = 0 (ingen dubbelträff)
+//
+// Bollens nya riktning = spelarens rörelseriktning (normaliserad).
+// Om spelaren står still används riktningen rakt mot motståndarens halva.
+// Bollens fart = basefart + spelarfart × SWING_FACTOR, begränsat av BALL_MAX_SPD.
+
+function checkHits() {
+  if (!ball.inPlay) return;
+
+  const pr    = playerRadius();
+  const br    = ballRadius();
+  const maxSp = court.h * 0.014;          // spelarens max-fart (px/frame)
+  const still = maxSp * 0.08;             // tröskel för "spelaren är stilla"
+
+  players.forEach((p, idx) => {
+    // Räkna ned cooldown
+    if (p.hitCooldown > 0) { p.hitCooldown--; return; }
+
+    // Avståndskontroll (2D – ignorerar höjden z för enkelhetens skull)
+    const dx   = ball.x - p.x;
+    const dy   = ball.y - p.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > pr + br) return;
+
+    // ── Riktning ───────────────────────────────────────────────────────
+    const pSpd = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+    let dirX, dirY;
+
+    if (pSpd > still) {
+      // Spelarens aktuella rörelseriktning styr bollen
+      dirX = p.vx / pSpd;
+      dirY = p.vy / pSpd;
+    } else {
+      // Stilla: slå rakt mot motståndarens halva
+      dirX = p.side === 'left' ? 1 : -1;
+      dirY = 0;
+    }
+
+    // ── Slagfart ───────────────────────────────────────────────────────
+    const baseSPD = court.w * BALL_BASE_F;
+    const hitSPD  = Math.min(baseSPD + pSpd * SWING_FACTOR, BALL_MAX_SPD);
+
+    ball.vx       = dirX * hitSPD;
+    ball.vy       = dirY * hitSPD;
+    ball.lastHit  = idx;
+    ball.returned = true;   // denna sida har returnerat bollen
+    p.hitCooldown = HIT_COOLDOWN;
+  });
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BOLLFYSIK – ETAPP 3
+// ═══════════════════════════════════════════════════════════════════════════
+
+function updateBall() {
+  if (!ball.inPlay) return;
+
+  const br   = ballRadius();
+  const prevX = ball.x;
+
+  // ── 1. Rörelse ────────────────────────────────────────────────────────────
+  ball.x += ball.vx;
+  ball.y += ball.vy;
+
+  // ── 2. Sido-väggar (övre och nedre kant) ──────────────────────────────────
+  if (ball.y - br < court.y) {
+    ball.y  = court.y + br;
+    ball.vy = Math.abs(ball.vy) * BOUNCE_WALL;
+  }
+  if (ball.y + br > court.y + court.h) {
+    ball.y  = court.y + court.h - br;
+    ball.vy = -Math.abs(ball.vy) * BOUNCE_WALL;
+  }
+
+  // ── 3. Bakväggar (vänster och höger kant) ─────────────────────────────────
+  if (ball.x - br < court.x) {
+    ball.x  = court.x + br;
+    ball.vx = Math.abs(ball.vx) * BOUNCE_WALL;
+  }
+  if (ball.x + br > court.x + court.w) {
+    ball.x  = court.x + court.w - br;
+    ball.vx = -Math.abs(ball.vx) * BOUNCE_WALL;
+  }
+
+  // ── 4. Nätkorsning → poängkontroll ────────────────────────────────────────
+  // En sida förlorar poänget om bollen korsar nätet tillbaka utan att ha returnerats.
+  const oldSide = prevX  < court.netX ? 0 : 1;
+  const newSide = ball.x < court.netX ? 0 : 1;
+
+  if (oldSide !== newSide) {
+    if (!ball.returned) {
+      // Spelaren på oldSide missade – motspelaren (newSide) får poänget
+      awardPoint(newSide);
+      return;   // bollen är ur spel, avbryt resten av uppdateringen
+    }
+    // Bollen är nu på newSide – den spelaren måste nu returnera
+    ball.returned = false;
+  }
+
+  // ── 5. Hastighetsbegränsning ──────────────────────────────────────────────
+  const spd = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy);
+  if (spd > BALL_MAX_SPD) {
+    ball.vx = (ball.vx / spd) * BALL_MAX_SPD;
+    ball.vy = (ball.vy / spd) * BALL_MAX_SPD;
+  }
+}
+
+// ── Rita bollen ──────────────────────────────────────────────────────────
+function drawBall() {
+  if (!ball.inPlay) return;
+  const br = ballRadius();
+
+  // Bollkropp – radial gradient för kulkänsla
+  const grad = ctx.createRadialGradient(
+    ball.x - br * 0.3, ball.y - br * 0.3, br * 0.05,
+    ball.x,            ball.y,            br
+  );
+  grad.addColorStop(0,   '#ffffff');
+  grad.addColorStop(0.4, '#DAF060');
+  grad.addColorStop(1,   '#93C800');
+
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(ball.x, ball.y, br, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.strokeStyle = 'rgba(180,140,0,0.6)';
+  ctx.lineWidth   = 0.8;
+  ctx.stroke();
+}
+
+// ── Debug-overlay ─────────────────────────────────────────────────────────
+// Tangent D visar bollens fysikdata i realtid.
+function drawDebug() {
+  const lines = [
+    `x: ${ball.x.toFixed(1)}  y: ${ball.y.toFixed(1)}`,
+    `vx: ${ball.vx.toFixed(2)}  vy: ${ball.vy.toFixed(2)}`,
+    `fart: ${Math.sqrt(ball.vx**2+ball.vy**2).toFixed(2)} px/f`,
+    `lastHit: ${ball.lastHit}  returned: ${ball.returned}`,
+    `inPlay: ${ball.inPlay}`,
+  ];
+
+  const lh = 18, pad = 10;
+  const bw = 220, bh = lines.length * lh + pad * 2;
+  const bx = court.x + court.w - bw - 8;
+  const by = court.y + 8;
+
+  ctx.fillStyle = 'rgba(0,0,0,0.72)';
+  ctx.beginPath();
+  ctx.roundRect(bx, by, bw, bh, 6);
+  ctx.fill();
+
+  ctx.fillStyle = '#00ff88';
+  ctx.font      = '12px monospace';
+  ctx.textAlign = 'left';
+  lines.forEach((l, i) => ctx.fillText(l, bx + pad, by + pad + 13 + i * lh));
+  ctx.textAlign = 'left';
+}
+
+// ── Flash-meddelande (poäng, game, set, match) ────────────────────────────
+function drawFlashMessage() {
+  if (scoring.flashTimer <= 0) return;
+
+  // Alpha: tona ut de sista 30 frames (om inte matchOver)
+  const alpha = scoring.matchOver
+    ? 0.95
+    : Math.min(1, scoring.flashTimer / 30);
+
+  const cx = court.x + court.w / 2;
+  const cy = court.y + court.h / 2;
+  const fs = scoring.flashBig
+    ? Math.round(court.h * 0.11)
+    : Math.round(court.h * 0.075);
+
+  ctx.save();
+  ctx.font         = `bold ${fs}px system-ui`;
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'middle';
+
+  const tw  = ctx.measureText(scoring.flashMsg).width;
+  const padX = fs * 0.55;
+  const padY = fs * 0.38;
+  const bw  = tw + padX * 2;
+  const bh  = fs  + padY * 2;
+
+  ctx.globalAlpha = alpha * 0.88;
+  ctx.fillStyle   = 'rgba(0,0,0,0.78)';
+  roundRectPath(ctx, cx - bw / 2, cy - bh / 2, bw, bh, bh / 2);
+  ctx.fill();
+
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle   = scoring.flashBig ? '#FFD700' : '#ffffff';
+  ctx.fillText(scoring.flashMsg, cx, cy);
+
+  ctx.textBaseline = 'alphabetic';
+  ctx.restore();
+
+  if (!scoring.matchOver) scoring.flashTimer--;
+}
+
+// ── Scoreboard ────────────────────────────────────────────────────────────
+
+function drawScoreboard() {
+  const ROW_H = (SB_H - HDR_H) / 2;
+
+  const fntLabel  = `${Math.round(HDR_H * 0.58)}px system-ui`;
+  const fntName   = `bold ${Math.round(ROW_H * 0.52)}px system-ui`;
+  const fntServe  = `${Math.round(ROW_H * 0.40)}px system-ui`;
+  const fntPoints = `bold ${Math.round(ROW_H * 0.66)}px system-ui`;
+  const fntGames  = `bold ${Math.round(ROW_H * 0.56)}px system-ui`;
+  const fntSets   = `bold ${Math.round(ROW_H * 0.58)}px system-ui`;
+
+  const tableW = Math.round(W * 0.94);
+  const C_NAME = Math.round(tableW * 0.330);
+  const C_PTS  = Math.round(tableW * 0.160);
+  const C_GEM  = Math.round(tableW * 0.140);
+  const C_SET  = Math.round(tableW * 0.185);
+  const startX = Math.round((W - tableW) / 2);
+
+  const colMid = {
+    pts:  startX + C_NAME + C_PTS / 2,
+    gem:  startX + C_NAME + C_PTS + C_GEM / 2,
+    set1: startX + C_NAME + C_PTS + C_GEM + C_SET * 0.5,
+    set2: startX + C_NAME + C_PTS + C_GEM + C_SET * 1.5,
+  };
+
+  ctx.fillStyle = '#040d1c';
+  ctx.fillRect(0, 0, W, SB_H);
+  ctx.strokeStyle = 'rgba(26,64,120,0.8)';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([]);
+  ctx.beginPath(); ctx.moveTo(0, SB_H); ctx.lineTo(W, SB_H); ctx.stroke();
+
+  ctx.fillStyle = 'rgba(255,255,255,0.06)';
+  ctx.fillRect(startX, 0, tableW, HDR_H);
+  const hdrY = Math.round(HDR_H * 0.76);
+  ctx.fillStyle = '#4a6a90';
+  ctx.font      = fntLabel;
+  ctx.textAlign = 'center';
+  ctx.fillText('POÄNG', colMid.pts,  hdrY);
+  ctx.fillText('GEM',   colMid.gem,  hdrY);
+  ctx.fillText('SET 1', colMid.set1, hdrY);
+  ctx.fillText('SET 2', colMid.set2, hdrY);
+
+  [0, 1].forEach(i => {
+    const rowY  = HDR_H + i * ROW_H;
+    const textY = rowY + ROW_H * 0.68;
+    const cx    = startX;
+
+    // Bakgrundsfärger per kolumn
+    ctx.fillStyle = i === 0 ? 'rgba(20,50,90,0.9)' : 'rgba(14,36,66,0.9)';
+    ctx.fillRect(cx, rowY, C_NAME, ROW_H);
+    ctx.fillStyle = 'rgba(3,9,20,0.95)';
+    ctx.fillRect(cx + C_NAME, rowY, C_PTS, ROW_H);
+    ctx.fillStyle = 'rgba(12,28,52,0.9)';
+    ctx.fillRect(cx + C_NAME + C_PTS, rowY, C_GEM, ROW_H);
+    ctx.fillStyle = 'rgba(220,232,248,1)';
+    ctx.fillRect(cx + C_NAME + C_PTS + C_GEM, rowY, C_SET, ROW_H);
+    ctx.fillStyle = 'rgba(200,215,235,1)';
+    ctx.fillRect(cx + C_NAME + C_PTS + C_GEM + C_SET, rowY, C_SET, ROW_H);
+
+    // Namn och serve-markör
+    ctx.fillStyle = '#d0e4ff';
+    ctx.font      = fntName;
+    ctx.textAlign = 'left';
+    ctx.fillText(PLAYER_NAMES[i], cx + Math.round(C_NAME * 0.07), textY);
+    if (i === scoring.serverIdx) {
+      ctx.fillStyle = '#4aaeff';
+      ctx.font      = fntServe;
+      ctx.fillText('▶', cx + C_NAME - Math.round(C_NAME * 0.12), textY);
+    }
+
+    // Poäng (tiebreak: tb-poäng; annars: 0/15/30/40/D/A)
+    const ptsStr = scoring.tiebreak ? scoring.tbPts[i].toString() : ptsLabel(i);
+
+    // Gem (games i nuvarande set)
+    const gemStr = scoring.gems[i].toString();
+
+    // Set-kolumner: visar avslutade sets historik, annars nuv. gems
+    const set1Str = scoring.setHistory[0]
+      ? (i === 0 ? scoring.setHistory[0].p0 : scoring.setHistory[0].p1).toString()
+      : gemStr;
+    const set2Str = scoring.setHistory[1]
+      ? (i === 0 ? scoring.setHistory[1].p0 : scoring.setHistory[1].p1).toString()
+      : scoring.setHistory.length >= 1 ? gemStr : '';
+
+    ctx.fillStyle = '#7ab8f0'; ctx.font = fntGames;
+    ctx.fillText(gemStr, colMid.gem, textY + 1);
+    ctx.fillStyle = '#1a2d45'; ctx.font = fntSets;
+    ctx.fillText(set1Str, colMid.set1, textY + 1);
+    ctx.fillText(set2Str, colMid.set2, textY + 1);
+  });
+
+  // Kolumnseparatorer
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+  ctx.lineWidth   = 1;
+  ctx.setLineDash([]);
+  [C_NAME, C_NAME+C_PTS, C_NAME+C_PTS+C_GEM, C_NAME+C_PTS+C_GEM+C_SET].forEach(off => {
+    ctx.beginPath();
+    ctx.moveTo(startX+off, HDR_H);
+    ctx.lineTo(startX+off, SB_H);
+    ctx.stroke();
+  });
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.beginPath();
+  ctx.moveTo(startX, HDR_H+ROW_H); ctx.lineTo(startX+tableW, HDR_H+ROW_H); ctx.stroke();
+
+  ctx.textAlign = 'left';
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// START
+// ═══════════════════════════════════════════════════════════════════════════
+
+window.addEventListener('resize', resize);
+resize();           // beräkna mått och placera ut spelare
+gameLoop();         // starta game loop (requestAnimationFrame)
+
+</script>
+</body>
+</html>
