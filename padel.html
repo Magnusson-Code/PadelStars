@@ -207,16 +207,21 @@ function initServe() {
 
   let bx, by, targetX, targetY;
 
+  // Serverutans centrum på motståndarens sida (mellan nätet och servlinjen).
+  // Deuce court (right=true): servaren i nedre halvan → diagonal till övre serverutan.
+  // Advantage court (right=false): servaren i övre halvan → diagonal till nedre serverutan.
   if (srv === 0) {
     bx      = x + br * 3;
-    by      = right ? y + h * 0.75 : y + h * 0.25;
-    targetX = (srv2X + x + w) / 2;
-    targetY = right ? (y + midY) / 2 : (midY + y + h) / 2;
+    by      = right ? y + h * 0.78 : y + h * 0.22;
+    targetX = (netX + srv2X) / 2;          // mitt i spelare 1:s serveruta (X)
+    targetY = right ? (y + midY) / 2       // diagonal till övre serverutan
+                    : (midY + y + h) / 2;  // diagonal till nedre serverutan
   } else {
     bx      = x + w - br * 3;
-    by      = right ? y + h * 0.25 : y + h * 0.75;
-    targetX = (x + srv1X) / 2;
-    targetY = right ? (midY + y + h) / 2 : (y + midY) / 2;
+    by      = right ? y + h * 0.22 : y + h * 0.78;
+    targetX = (srv1X + netX) / 2;          // mitt i spelare 0:s serveruta (X)
+    targetY = right ? (midY + y + h) / 2   // diagonal till nedre serverutan
+                    : (y + midY) / 2;      // diagonal till övre serverutan
   }
 
   ball.x        = bx;
