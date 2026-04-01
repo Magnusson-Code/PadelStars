@@ -321,6 +321,11 @@ canvas.addEventListener('touchmove', e => {
     p.x += dx;
     p.y += dy;
 
+    // Spara delta som hastighet så slaglogiken får rätt rörelseriktning
+    // (checkHits läser p.vx/p.vy – utan detta ser spelaren alltid "stilla" ut)
+    p.vx = dx;
+    p.vy = dy;
+
     // Uppdatera rackelvinkeln i rörelseriktningen
     if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
       p.angle = Math.atan2(dy, dx);
@@ -334,7 +339,15 @@ canvas.addEventListener('touchmove', e => {
 canvas.addEventListener('touchend',    handleTouchEnd);
 canvas.addEventListener('touchcancel', handleTouchEnd);
 function handleTouchEnd(e) {
-  for (const t of e.changedTouches) delete activeTouches[t.identifier];
+  for (const t of e.changedTouches) {
+    const rec = activeTouches[t.identifier];
+    if (rec) {
+      // Nolla hastigheten när fingret lyfts så spelaren inte verkar röra sig
+      players[rec.playerIdx].vx = 0;
+      players[rec.playerIdx].vy = 0;
+    }
+    delete activeTouches[t.identifier];
+  }
 }
 
 
