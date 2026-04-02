@@ -59,6 +59,81 @@ const canvas = document.getElementById('gameCanvas');
 const ctx    = canvas.getContext('2d');
 const msg    = document.getElementById('small-screen-msg');
 
+// ── Ljud (Web Audio API – Variant B: Realistisk padel) ────────────────────
+// AudioContext skapas vid första användarinteraktion (autoplay-policy).
+
+let _ac = null;
+function getAC() {
+  if (!_ac) _ac = new (window.AudioContext || window.webkitAudioContext)();
+  if (_ac.state === 'suspended') _ac.resume();
+  return _ac;
+}
+
+function _osc(type, freq, t, dur, vol, freqEnd) {
+  const ac = getAC();
+  const o  = ac.createOscillator();
+  o.type   = type;
+  o.frequency.setValueAtTime(freq, t);
+  if (freqEnd != null) o.frequency.linearRampToValueAtTime(freqEnd, t + dur);
+  const g  = ac.createGain();
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(vol, t + 0.005);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(ac.destination);
+  o.start(t); o.stop(t + dur + 0.05);
+}
+
+function _noise(t, dur, vol, lpFreq) {
+  const ac     = getAC();
+  const frames = Math.ceil(dur * ac.sampleRate);
+  const buf    = ac.createBuffer(1, frames, ac.sampleRate);
+  const data   = buf.getChannelData(0);
+  for (let i = 0; i < frames; i++) data[i] = Math.random() * 2 - 1;
+  const src = ac.createBufferSource();
+  src.buffer = buf;
+  const lp  = ac.createBiquadFilter();
+  lp.type = 'lowpass'; lp.frequency.value = lpFreq;
+  const g   = ac.createGain();
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  src.connect(lp); lp.connect(g); g.connect(ac.destination);
+  src.start(t); src.stop(t + dur + 0.05);
+}
+
+const snd = {
+  hit() {   // Racketträff – thwack
+    const t = getAC().currentTime + 0.01;
+    _noise(t, 0.06, 0.35, 3500);
+    _osc('sine', 700, t, 0.08, 0.40, 380);
+  },
+  wall() {  // Väggstud – tunk
+    const t = getAC().currentTime + 0.01;
+    _noise(t, 0.08, 0.28, 800);
+    _osc('sine', 200, t, 0.10, 0.35, 130);
+  },
+  serve() { // Serv – lätt pop/swoosh
+    const t = getAC().currentTime + 0.01;
+    _noise(t, 0.10, 0.18, 1200);
+    _osc('sine', 500, t, 0.10, 0.22, 350);
+  },
+  point() { // Poäng – vissling uppåt
+    const t = getAC().currentTime + 0.01;
+    _osc('sine', 880, t, 0.25, 0.45, 1200);
+  },
+  game() {  // Game – trumsmäll + toner
+    const t = getAC().currentTime + 0.01;
+    _noise(t, 0.06, 0.25, 400);
+    _osc('sine', 523, t + 0.08, 0.18, 0.50);
+    _osc('sine', 784, t + 0.25, 0.20, 0.50);
+  },
+  win() {   // Set/Match – applåd-burst + fanfar
+    const t = getAC().currentTime + 0.01;
+    _noise(t, 0.20, 0.22, 600);
+    [523, 659, 784, 1047].forEach((f, i) =>
+      _osc('sine', f, t + 0.12 + i * 0.14, 0.22, 0.50));
+  },
+};
+
 // ── Spelarbilder ───────────────────────────────────────────────────────────
 // Bilder laddas asynkront; ritning sker automatiskt när de är redo.
 const playerImages = [new Image(), new Image()];
@@ -277,6 +352,7 @@ function initServe() {
     // Ge servaren cooldown så checkHits() inte omedelbart skriver över
     // serve-riktningen (bollen startar precis vid spelarens fötter)
     players[srv].hitCooldown = HIT_COOLDOWN;
+    snd.serve();
   }, 1500);
 }
 
@@ -911,6 +987,7 @@ function roundRectPath(ctx, x, y, w, h, r) {
 
 function awardPoint(w) {
   ball.inPlay = false;
+  snd.point();
   scorePoint(w);
 }
 
@@ -971,6 +1048,7 @@ function gameWon(w) {
       scoring.tbPts         = [0, 0];
       scoring.tbTotalPts    = 0;
       scoring.tbFirstServer = scoring.serverIdx;
+      snd.game();
       flash('Tiebreak!', true, 120);
       setTimeout(() => initServe(), 2200);
       return;
@@ -979,12 +1057,14 @@ function gameWon(w) {
     if (scoring.gems[w] >= 2) {
       scoring.matchOver = true;
       scoring.winner    = w;
+      snd.win();
       flash(PLAYER_NAMES[w] + ' vinner! 🎉  Tryck var som helst för ny match', true, 9999);
       ball.inPlay = false;
       return;
     }
     // Nästa game i minimatch
     scoring.serverIdx = opp;
+    snd.game();
     flash('Game ' + PLAYER_NAMES[w] + '!  ' + scoring.gems[0] + '–' + scoring.gems[1], true, 120);
     setTimeout(() => initServe(), 2000);
     return;
@@ -996,6 +1076,7 @@ function gameWon(w) {
     scoring.tbPts         = [0, 0];
     scoring.tbTotalPts    = 0;
     scoring.tbFirstServer = scoring.serverIdx;
+    snd.game();
     flash('Tiebreak!', true, 120);
     setTimeout(() => initServe(), 2200);
     return;
@@ -1008,6 +1089,7 @@ function gameWon(w) {
 
   // Game vunnet, serven byter
   scoring.serverIdx = opp;
+  snd.game();
   flash('Game ' + PLAYER_NAMES[w] + '!  ' + scoring.gems[0] + '–' + scoring.gems[1], true, 120);
   setTimeout(() => initServe(), 2000);
 }
@@ -1026,6 +1108,7 @@ function wonSet(w) {
     // Match vunnen!
     scoring.matchOver = true;
     scoring.winner    = w;
+    snd.win();
     flash(PLAYER_NAMES[w] + ' vinner matchen! 🎉  Tryck var som helst för ny match', true, 9999);
     ball.inPlay = false;
     return;
@@ -1034,6 +1117,7 @@ function wonSet(w) {
   // Nytt set – serven byter
   scoring.serverIdx      = opp;
   scoring.serveFromRight = true;
+  snd.win();
   flash('Set ' + PLAYER_NAMES[w] + '!', true, 130);
   setTimeout(() => initServe(), 2200);
 }
@@ -1050,6 +1134,7 @@ function scoreTiebreak(w) {
       // I minimatch avgör tiebreak hela matchen
       scoring.matchOver = true;
       scoring.winner    = w;
+      snd.win();
       flash(PLAYER_NAMES[w] + ' vinner! 🎉  Tryck var som helst för ny match', true, 9999);
       ball.inPlay = false;
     } else {
@@ -1165,6 +1250,7 @@ function checkHits() {
     ball.lastHit  = idx;
     ball.returned = true;   // denna sida har returnerat bollen
     p.hitCooldown = HIT_COOLDOWN;
+    snd.hit();
   });
 }
 
@@ -1187,20 +1273,24 @@ function updateBall() {
   if (ball.y - br < court.y) {
     ball.y  = court.y + br;
     ball.vy = Math.abs(ball.vy) * BOUNCE_WALL;
+    snd.wall();
   }
   if (ball.y + br > court.y + court.h) {
     ball.y  = court.y + court.h - br;
     ball.vy = -Math.abs(ball.vy) * BOUNCE_WALL;
+    snd.wall();
   }
 
   // ── 3. Bakväggar (vänster och höger kant) ─────────────────────────────────
   if (ball.x - br < court.x) {
     ball.x  = court.x + br;
     ball.vx = Math.abs(ball.vx) * BOUNCE_WALL;
+    snd.wall();
   }
   if (ball.x + br > court.x + court.w) {
     ball.x  = court.x + court.w - br;
     ball.vx = -Math.abs(ball.vx) * BOUNCE_WALL;
+    snd.wall();
   }
 
   // ── 4. Nätkorsning → poängkontroll ────────────────────────────────────────
@@ -1529,16 +1619,7 @@ function drawStartScreen() {
     'Bäst av 3 set', '6 gem per set',
     '#4a9eff', 'rgba(74,158,255,0.55)', 'rgba(0,16,52,0.92)');
 
-  // Tips längst ned
-  const tipSize = Math.round(Math.min(W * 0.022, 16));
-  ctx.font      = `${tipSize}px system-ui`;
-  ctx.fillStyle = 'rgba(100,140,180,0.6)';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText('Tryck var som helst under pågående match för att starta om', W / 2, H * 0.94);
 
-  ctx.textAlign    = 'left';
-  ctx.textBaseline = 'alphabetic';
 }
 
 // Ritar en startskärmsknapp
