@@ -1058,7 +1058,7 @@ function gameWon(w) {
       scoring.matchOver = true;
       scoring.winner    = w;
       snd.win();
-      flash(PLAYER_NAMES[w] + ' vinner! 🎉  Tryck var som helst för ny match', true, 9999);
+      flash(PLAYER_NAMES[w] + ' vinner! 🎉', true, 9999);
       ball.inPlay = false;
       return;
     }
@@ -1109,7 +1109,7 @@ function wonSet(w) {
     scoring.matchOver = true;
     scoring.winner    = w;
     snd.win();
-    flash(PLAYER_NAMES[w] + ' vinner matchen! 🎉  Tryck var som helst för ny match', true, 9999);
+    flash(PLAYER_NAMES[w] + ' vinner matchen! 🎉', true, 9999);
     ball.inPlay = false;
     return;
   }
@@ -1135,7 +1135,7 @@ function scoreTiebreak(w) {
       scoring.matchOver = true;
       scoring.winner    = w;
       snd.win();
-      flash(PLAYER_NAMES[w] + ' vinner! 🎉  Tryck var som helst för ny match', true, 9999);
+      flash(PLAYER_NAMES[w] + ' vinner! 🎉 ', true, 9999);
       ball.inPlay = false;
     } else {
       wonSet(w);
