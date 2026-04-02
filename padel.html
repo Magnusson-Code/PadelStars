@@ -194,6 +194,11 @@ const ball = {
   inPlay: false,
 };
 
+// Räknare som ökas varje gång initServe() anropas.
+// Varje setTimeout-callback kontrollerar att den tillhör senaste serve-anropet
+// och avbryter annars – hindrar inaktuella timeouts från att skjuta iväg bollen.
+let serveGeneration = 0;
+
 // Startar/återstartar bollen på serverarens halva för testning
 // Placerar bollen och spelaren på rätt serve-position och startar auto-serve.
 // Serve-sidan (deuce/advantage court) styrs av scoring.serveFromRight.
@@ -246,15 +251,23 @@ function initServe() {
   players[srv].y = by;
   players[srv].vx = players[srv].vy = 0;
 
+  // Spara generationsnummer för detta serve-anrop
+  const myGen = ++serveGeneration;
+
   // Auto-launch efter 1,5 s
+  // Riktningen beräknas från bx/by (inläst i closure) → alltid korrekt diagonal
+  // oavsett om ball.x/ball.y ändrats av ett senare initServe-anrop.
   setTimeout(() => {
-    if (scoring.matchOver) return;
-    const dx   = targetX - ball.x;
-    const dy   = targetY - ball.y;
+    if (scoring.matchOver || serveGeneration !== myGen) return;
+    const dx   = targetX - bx;   // använd closure-värden, INTE ball.x/ball.y
+    const dy   = targetY - by;
     const dist = Math.sqrt(dx * dx + dy * dy);
     const spd  = court.w * 0.012;
-    ball.vx    = (dx / dist) * spd;
-    ball.vy    = (dy / dist) * spd;
+    // Återställ positionen och sätt farten
+    ball.x      = bx;
+    ball.y      = by;
+    ball.vx     = (dx / dist) * spd;
+    ball.vy     = (dy / dist) * spd;
     ball.inPlay = true;
   }, 1500);
 }
