@@ -269,6 +269,9 @@ function initServe() {
     ball.vx     = (dx / dist) * spd;
     ball.vy     = (dy / dist) * spd;
     ball.inPlay = true;
+    // Ge servaren cooldown så checkHits() inte omedelbart skriver över
+    // serve-riktningen (bollen startar precis vid spelarens fötter)
+    players[srv].hitCooldown = HIT_COOLDOWN;
   }, 1500);
 }
 
