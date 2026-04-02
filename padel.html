@@ -328,6 +328,10 @@ canvas.addEventListener('touchstart', e => {
     if (t) handleStartTap(t.clientX, t.clientY);
     return;
   }
+  if (scoring.matchOver) {
+    resetMatch();
+    return;
+  }
   for (const t of e.changedTouches) {
     // Vilken halva av skärmen? → vilken spelare?
     const playerIdx = t.clientX < W / 2 ? 0 : 1;
@@ -385,9 +389,10 @@ function handleTouchEnd(e) {
   }
 }
 
-// Click-handler – hanterar mus/trackpad-klick på startskärmen
+// Click-handler – hanterar mus/trackpad-klick på startskärmen och efter match
 canvas.addEventListener('click', e => {
-  if (gameState === 'start') handleStartTap(e.clientX, e.clientY);
+  if (gameState === 'start') { handleStartTap(e.clientX, e.clientY); return; }
+  if (scoring.matchOver) resetMatch();
 });
 
 // Kontrollerar om ett tryck/klick träffar en startskärmsknapp
@@ -974,7 +979,7 @@ function gameWon(w) {
     if (scoring.gems[w] >= 2) {
       scoring.matchOver = true;
       scoring.winner    = w;
-      flash(PLAYER_NAMES[w] + ' vinner! 🎉  Tryck R för ny match', true, 9999);
+      flash(PLAYER_NAMES[w] + ' vinner! 🎉  Tryck var som helst för ny match', true, 9999);
       ball.inPlay = false;
       return;
     }
@@ -1021,7 +1026,7 @@ function wonSet(w) {
     // Match vunnen!
     scoring.matchOver = true;
     scoring.winner    = w;
-    flash(PLAYER_NAMES[w] + ' vinner matchen! 🎉  Tryck R för ny match', true, 9999);
+    flash(PLAYER_NAMES[w] + ' vinner matchen! 🎉  Tryck var som helst för ny match', true, 9999);
     ball.inPlay = false;
     return;
   }
@@ -1045,7 +1050,7 @@ function scoreTiebreak(w) {
       // I minimatch avgör tiebreak hela matchen
       scoring.matchOver = true;
       scoring.winner    = w;
-      flash(PLAYER_NAMES[w] + ' vinner! 🎉  Tryck R för ny match', true, 9999);
+      flash(PLAYER_NAMES[w] + ' vinner! 🎉  Tryck var som helst för ny match', true, 9999);
       ball.inPlay = false;
     } else {
       wonSet(w);
@@ -1530,7 +1535,7 @@ function drawStartScreen() {
   ctx.fillStyle = 'rgba(100,140,180,0.6)';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText('Tryck R under match för att återgå hit', W / 2, H * 0.94);
+  ctx.fillText('Tryck var som helst under pågående match för att starta om', W / 2, H * 0.94);
 
   ctx.textAlign    = 'left';
   ctx.textBaseline = 'alphabetic';
