@@ -97,6 +97,11 @@ let WALL_T = 8;
 
 let W = 0, H = 0;   // canvas-storlek
 
+// ── Match format & startskärm ─────────────────────────────────────────────
+let gameState    = 'start';  // 'start' | 'playing'
+let matchFormat  = 'full';   // 'mini' | 'full'
+let startButtons = [];       // [{x,y,w,h,format}, ...] – sätts i drawStartScreen
+
 // Banans koordinater (uppdateras i resize)
 let court = { x:0, y:0, w:0, h:0, netX:0, midY:0, srv1X:0, srv2X:0 };
 
@@ -318,6 +323,11 @@ const activeTouches = {};   // touchIdentifier → { lastX, lastY, playerIdx }
 
 canvas.addEventListener('touchstart', e => {
   e.preventDefault();
+  if (gameState === 'start') {
+    const t = e.changedTouches[0];
+    if (t) handleStartTap(t.clientX, t.clientY);
+    return;
+  }
   for (const t of e.changedTouches) {
     // Vilken halva av skärmen? → vilken spelare?
     const playerIdx = t.clientX < W / 2 ? 0 : 1;
@@ -375,6 +385,22 @@ function handleTouchEnd(e) {
   }
 }
 
+// Click-handler – hanterar mus/trackpad-klick på startskärmen
+canvas.addEventListener('click', e => {
+  if (gameState === 'start') handleStartTap(e.clientX, e.clientY);
+});
+
+// Kontrollerar om ett tryck/klick träffar en startskärmsknapp
+function handleStartTap(x, y) {
+  for (const btn of startButtons) {
+    if (x >= btn.x && x <= btn.x + btn.w &&
+        y >= btn.y && y <= btn.y + btn.h) {
+      startGame(btn.format);
+      return;
+    }
+  }
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 // RESIZE
@@ -414,7 +440,7 @@ function resize() {
 
   if (!playersReady) {
     initPlayers();
-    initServe();
+    // initServe anropas av startGame() – inte här vid start-skärmen
     playersReady = true;
   } else {
     players.forEach(clampPlayer);
@@ -430,11 +456,16 @@ function resize() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 function gameLoop() {
-  handleInput();
-  updatePlayers();
-  checkHits();       // ← nytt i etapp 4
-  updateBall();
-  draw();
+  if (gameState === 'start') {
+    ctx.clearRect(0, 0, W, H);
+    drawStartScreen();
+  } else {
+    handleInput();
+    updatePlayers();
+    checkHits();
+    updateBall();
+    draw();
+  }
   requestAnimationFrame(gameLoop);
 }
 
@@ -928,7 +959,33 @@ function gameWon(w) {
   scoring.ptsInGame  = 0;
   scoring.serveFromRight = true;
 
-  // Tiebreak vid 6–6
+  if (matchFormat === 'mini') {
+    // Minimatch: tiebreak vid 1–1
+    if (scoring.gems[0] === 1 && scoring.gems[1] === 1) {
+      scoring.tiebreak      = true;
+      scoring.tbPts         = [0, 0];
+      scoring.tbTotalPts    = 0;
+      scoring.tbFirstServer = scoring.serverIdx;
+      flash('Tiebreak!', true, 120);
+      setTimeout(() => initServe(), 2200);
+      return;
+    }
+    // Minimatch vunnet (2 gem)
+    if (scoring.gems[w] >= 2) {
+      scoring.matchOver = true;
+      scoring.winner    = w;
+      flash(PLAYER_NAMES[w] + ' vinner! 🎉  Tryck R för ny match', true, 9999);
+      ball.inPlay = false;
+      return;
+    }
+    // Nästa game i minimatch
+    scoring.serverIdx = opp;
+    flash('Game ' + PLAYER_NAMES[w] + '!  ' + scoring.gems[0] + '–' + scoring.gems[1], true, 120);
+    setTimeout(() => initServe(), 2000);
+    return;
+  }
+
+  // Full format – Tiebreak vid 6–6
   if (scoring.gems[0] === 6 && scoring.gems[1] === 6) {
     scoring.tiebreak      = true;
     scoring.tbPts         = [0, 0];
@@ -984,7 +1041,16 @@ function scoreTiebreak(w) {
 
   // Vinst: minst 7 poäng och 2 poängs försprång
   if (scoring.tbPts[w] >= 7 && (scoring.tbPts[w] - scoring.tbPts[opp]) >= 2) {
-    wonSet(w); return;
+    if (matchFormat === 'mini') {
+      // I minimatch avgör tiebreak hela matchen
+      scoring.matchOver = true;
+      scoring.winner    = w;
+      flash(PLAYER_NAMES[w] + ' vinner! 🎉  Tryck R för ny match', true, 9999);
+      ball.inPlay = false;
+    } else {
+      wonSet(w);
+    }
+    return;
   }
 
   // Serve-rotation: byt efter 1 poäng, sedan var 2:a
@@ -998,8 +1064,27 @@ function scoreTiebreak(w) {
   setTimeout(() => initServe(), 1200);
 }
 
-// Återstartar hela matchen
+// Återstartar hela matchen och visar startskärmen
 function resetMatch() {
+  gameState   = 'start';
+  ball.inPlay = false;
+  serveGeneration++;   // avbryter eventuell väntande serve-timeout
+  Object.assign(scoring, {
+    pts: [0,0], phase: 'normal',
+    gems: [0,0], setsWon: [0,0], setHistory: [],
+    serverIdx: 0, serveFromRight: true, ptsInGame: 0,
+    tiebreak: false, tbPts: [0,0], tbTotalPts: 0, tbFirstServer: 0,
+    matchOver: false, winner: -1, flashMsg: '', flashTimer: 0, flashBig: false,
+  });
+  players[0].hitCooldown = 0;
+  players[1].hitCooldown = 0;
+}
+
+// Startar en ny match med valt format
+function startGame(format) {
+  matchFormat = format;
+  gameState   = 'playing';
+  serveGeneration++;
   Object.assign(scoring, {
     pts: [0,0], phase: 'normal',
     gems: [0,0], setsWon: [0,0], setHistory: [],
@@ -1242,11 +1327,14 @@ function drawScoreboard() {
   const fntSets   = `bold ${Math.round(ROW_H * 0.58)}px system-ui`;
 
   const tableW = Math.round(W * 0.94);
-  const C_NAME = Math.round(tableW * 0.330);
-  const C_PTS  = Math.round(tableW * 0.160);
-  const C_GEM  = Math.round(tableW * 0.140);
-  const C_SET  = Math.round(tableW * 0.185);
   const startX = Math.round((W - tableW) / 2);
+
+  // Kolumnbredder beror på matchformat
+  const isMini = matchFormat === 'mini';
+  const C_NAME = Math.round(tableW * (isMini ? 0.44 : 0.330));
+  const C_PTS  = Math.round(tableW * (isMini ? 0.28 : 0.160));
+  const C_GEM  = Math.round(tableW * (isMini ? 0.28 : 0.140));
+  const C_SET  = isMini ? 0 : Math.round(tableW * 0.185);
 
   const colMid = {
     pts:  startX + C_NAME + C_PTS / 2,
@@ -1270,8 +1358,10 @@ function drawScoreboard() {
   ctx.textAlign = 'center';
   ctx.fillText('POÄNG', colMid.pts,  hdrY);
   ctx.fillText('GEM',   colMid.gem,  hdrY);
-  ctx.fillText('SET 1', colMid.set1, hdrY);
-  ctx.fillText('SET 2', colMid.set2, hdrY);
+  if (!isMini) {
+    ctx.fillText('SET 1', colMid.set1, hdrY);
+    ctx.fillText('SET 2', colMid.set2, hdrY);
+  }
 
   [0, 1].forEach(i => {
     const rowY  = HDR_H + i * ROW_H;
@@ -1285,10 +1375,12 @@ function drawScoreboard() {
     ctx.fillRect(cx + C_NAME, rowY, C_PTS, ROW_H);
     ctx.fillStyle = 'rgba(12,28,52,0.9)';
     ctx.fillRect(cx + C_NAME + C_PTS, rowY, C_GEM, ROW_H);
-    ctx.fillStyle = 'rgba(220,232,248,1)';
-    ctx.fillRect(cx + C_NAME + C_PTS + C_GEM, rowY, C_SET, ROW_H);
-    ctx.fillStyle = 'rgba(200,215,235,1)';
-    ctx.fillRect(cx + C_NAME + C_PTS + C_GEM + C_SET, rowY, C_SET, ROW_H);
+    if (!isMini) {
+      ctx.fillStyle = 'rgba(220,232,248,1)';
+      ctx.fillRect(cx + C_NAME + C_PTS + C_GEM, rowY, C_SET, ROW_H);
+      ctx.fillStyle = 'rgba(200,215,235,1)';
+      ctx.fillRect(cx + C_NAME + C_PTS + C_GEM + C_SET, rowY, C_SET, ROW_H);
+    }
 
     // Namn och serve-markör
     ctx.fillStyle = '#d0e4ff';
@@ -1303,30 +1395,37 @@ function drawScoreboard() {
 
     // Poäng (tiebreak: tb-poäng; annars: 0/15/30/40/D/A)
     const ptsStr = scoring.tiebreak ? scoring.tbPts[i].toString() : ptsLabel(i);
+    ctx.fillStyle = '#ffffff'; ctx.font = fntPoints;
+    ctx.textAlign = 'center';
+    ctx.fillText(ptsStr, colMid.pts, textY + 1);
 
     // Gem (games i nuvarande set)
     const gemStr = scoring.gems[i].toString();
-
-    // Set-kolumner: visar avslutade sets historik, annars nuv. gems
-    const set1Str = scoring.setHistory[0]
-      ? (i === 0 ? scoring.setHistory[0].p0 : scoring.setHistory[0].p1).toString()
-      : gemStr;
-    const set2Str = scoring.setHistory[1]
-      ? (i === 0 ? scoring.setHistory[1].p0 : scoring.setHistory[1].p1).toString()
-      : scoring.setHistory.length >= 1 ? gemStr : '';
-
     ctx.fillStyle = '#7ab8f0'; ctx.font = fntGames;
     ctx.fillText(gemStr, colMid.gem, textY + 1);
-    ctx.fillStyle = '#1a2d45'; ctx.font = fntSets;
-    ctx.fillText(set1Str, colMid.set1, textY + 1);
-    ctx.fillText(set2Str, colMid.set2, textY + 1);
+
+    // Set-kolumner: visas bara i full-format
+    if (!isMini) {
+      const set1Str = scoring.setHistory[0]
+        ? (i === 0 ? scoring.setHistory[0].p0 : scoring.setHistory[0].p1).toString()
+        : gemStr;
+      const set2Str = scoring.setHistory[1]
+        ? (i === 0 ? scoring.setHistory[1].p0 : scoring.setHistory[1].p1).toString()
+        : scoring.setHistory.length >= 1 ? gemStr : '';
+      ctx.fillStyle = '#1a2d45'; ctx.font = fntSets;
+      ctx.fillText(set1Str, colMid.set1, textY + 1);
+      ctx.fillText(set2Str, colMid.set2, textY + 1);
+    }
   });
 
   // Kolumnseparatorer
   ctx.strokeStyle = 'rgba(255,255,255,0.08)';
   ctx.lineWidth   = 1;
   ctx.setLineDash([]);
-  [C_NAME, C_NAME+C_PTS, C_NAME+C_PTS+C_GEM, C_NAME+C_PTS+C_GEM+C_SET].forEach(off => {
+  const sepOffsets = isMini
+    ? [C_NAME, C_NAME + C_PTS]
+    : [C_NAME, C_NAME+C_PTS, C_NAME+C_PTS+C_GEM, C_NAME+C_PTS+C_GEM+C_SET];
+  sepOffsets.forEach(off => {
     ctx.beginPath();
     ctx.moveTo(startX+off, HDR_H);
     ctx.lineTo(startX+off, SB_H);
@@ -1337,6 +1436,245 @@ function drawScoreboard() {
   ctx.moveTo(startX, HDR_H+ROW_H); ctx.lineTo(startX+tableW, HDR_H+ROW_H); ctx.stroke();
 
   ctx.textAlign = 'left';
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STARTSKÄRM
+// ═══════════════════════════════════════════════════════════════════════════
+
+function drawStartScreen() {
+  // ── Bakgrund ────────────────────────────────────────────────────────────
+  ctx.fillStyle = '#07111e';
+  ctx.fillRect(0, 0, W, H);
+
+  // ── Dekorativ bana (tonad) ───────────────────────────────────────────────
+  const cw = Math.min(W * 0.88, H * 1.6);
+  const ch = cw / 2;
+  const cxc = (W - cw) / 2;
+  const cyc = (H - ch) / 2 + H * 0.06;
+
+  ctx.save();
+  ctx.globalAlpha = 0.14;
+  ctx.fillStyle = '#1565b8';
+  ctx.fillRect(cxc, cyc, cw, ch);
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1.5;
+  // Bakvägg-ram
+  ctx.strokeRect(cxc, cyc, cw, ch);
+  // Nätlinje
+  ctx.beginPath(); ctx.moveTo(cxc + cw/2, cyc); ctx.lineTo(cxc + cw/2, cyc + ch); ctx.stroke();
+  // Servlinjer
+  const srvOff = (SERVE_LINE_M / COURT_M_WID) * (cw / 2);
+  ctx.beginPath(); ctx.moveTo(cxc + cw/2 - srvOff, cyc); ctx.lineTo(cxc + cw/2 - srvOff, cyc + ch); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cxc + cw/2 + srvOff, cyc); ctx.lineTo(cxc + cw/2 + srvOff, cyc + ch); ctx.stroke();
+  // Mittlinjer i serverutorna
+  ctx.beginPath(); ctx.moveTo(cxc + cw/2 - srvOff, cyc + ch/2); ctx.lineTo(cxc + cw/2, cyc + ch/2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cxc + cw/2, cyc + ch/2); ctx.lineTo(cxc + cw/2 + srvOff, cyc + ch/2); ctx.stroke();
+  ctx.restore();
+
+  // ── Racket (stor, dekorativ) ─────────────────────────────────────────────
+  const racketScale = Math.min(H * 0.30, W * 0.12);
+  const totalRacketLen = racketScale * 1.89;
+  // Riktar racketen uppåt-vänster; butt-enden placeras under mitten
+  const racketAngle = -Math.PI * 0.52;
+  const rcx = W * 0.56;
+  const rcy = H * 0.50 + totalRacketLen * 0.48;
+  drawStartRacket(rcx, rcy, racketAngle, racketScale);
+
+  // ── Titel ────────────────────────────────────────────────────────────────
+  const titleSize = Math.round(Math.min(W * 0.09, H * 0.14, 88));
+  ctx.save();
+  ctx.font         = `bold ${titleSize}px system-ui`;
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.shadowColor  = 'rgba(21,101,184,0.9)';
+  ctx.shadowBlur   = titleSize * 0.55;
+  ctx.fillStyle    = '#ffffff';
+  ctx.fillText('PadelStars', W / 2, H * 0.17);
+  ctx.restore();
+
+  // Underrubrik
+  const subSize = Math.round(titleSize * 0.34);
+  ctx.font         = `${subSize}px system-ui`;
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle    = '#7ec8e3';
+  ctx.fillText('Välj matchformat', W / 2, H * 0.17 + titleSize * 1.0);
+
+  // ── Knappar ──────────────────────────────────────────────────────────────
+  const btnW   = Math.round(Math.min(W * 0.30, 280));
+  const btnH   = Math.round(Math.min(H * 0.23, 140));
+  const btnGap = Math.round(W * 0.045);
+  const totalBtnW = btnW * 2 + btnGap;
+  const btnX1 = Math.round((W - totalBtnW) / 2);
+  const btnX2 = btnX1 + btnW + btnGap;
+  const btnY  = Math.round(H * 0.62);
+
+  startButtons = [
+    { x: btnX1, y: btnY, w: btnW, h: btnH, format: 'mini' },
+    { x: btnX2, y: btnY, w: btnW, h: btnH, format: 'full' },
+  ];
+
+  drawStartButton(startButtons[0], 'MINI',
+    'Först till 2 gem', 'Tiebreak vid 1–1',
+    '#c8a800', 'rgba(200,168,0,0.65)', 'rgba(60,40,0,0.92)');
+
+  drawStartButton(startButtons[1], 'FULL',
+    'Bäst av 3 set', '6 gem per set',
+    '#4a9eff', 'rgba(74,158,255,0.55)', 'rgba(0,16,52,0.92)');
+
+  // Tips längst ned
+  const tipSize = Math.round(Math.min(W * 0.022, 16));
+  ctx.font      = `${tipSize}px system-ui`;
+  ctx.fillStyle = 'rgba(100,140,180,0.6)';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('Tryck R under match för att återgå hit', W / 2, H * 0.94);
+
+  ctx.textAlign    = 'left';
+  ctx.textBaseline = 'alphabetic';
+}
+
+// Ritar en startskärmsknapp
+function drawStartButton(btn, label, desc1, desc2, borderColor, fillTop, fillBot) {
+  const { x, y, w, h } = btn;
+  const r = h * 0.16;
+
+  // Bakgrundsgradient
+  const grad = ctx.createLinearGradient(x, y, x, y + h);
+  grad.addColorStop(0, fillTop);
+  grad.addColorStop(1, fillBot);
+  ctx.fillStyle = grad;
+  roundRectPath(ctx, x, y, w, h, r);
+  ctx.fill();
+
+  // Glow-kant
+  ctx.save();
+  ctx.shadowColor = borderColor;
+  ctx.shadowBlur  = 18;
+  ctx.strokeStyle = borderColor;
+  ctx.lineWidth   = 2.5;
+  roundRectPath(ctx, x, y, w, h, r);
+  ctx.stroke();
+  ctx.restore();
+
+  // Etikett
+  const labelSize = Math.round(h * 0.33);
+  ctx.font         = `bold ${labelSize}px system-ui`;
+  ctx.fillStyle    = '#ffffff';
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, x + w / 2, y + h * 0.33);
+
+  // Beskrivning
+  const descSize = Math.round(h * 0.17);
+  ctx.font      = `${descSize}px system-ui`;
+  ctx.fillStyle = 'rgba(255,255,255,0.80)';
+  ctx.fillText(desc1, x + w / 2, y + h * 0.60);
+  ctx.fillText(desc2, x + w / 2, y + h * 0.80);
+}
+
+// Ritar ett fristående racket (utan spelarobjekt).
+// cx, cy = butt-ändens position, angle = riktning, r = skalstor
+function drawStartRacket(cx, cy, angle, r) {
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const px  = -sin;
+  const py  =  cos;
+
+  const gripLen  = r * 0.58;
+  const gripW    = r * 0.21;
+  const headR    = r * 0.76;
+  const gripMid  = gripLen * 0.5;
+  const headDist = gripLen + headR * 0.72;
+  const throatD  = gripLen;
+
+  const gcx = cx + cos * gripMid;
+  const gcy = cy + sin * gripMid;
+  const hcx = cx + cos * headDist;
+  const hcy = cy + sin * headDist;
+
+  // Hals (trapets)
+  const tx0 = cx + cos * throatD;
+  const ty0 = cy + sin * throatD;
+  const tx1 = cx + cos * (headDist - headR * 0.55);
+  const ty1 = cy + sin * (headDist - headR * 0.55);
+  ctx.fillStyle = '#111';
+  ctx.beginPath();
+  ctx.moveTo(tx0 + px * gripW * 0.9,  ty0 + py * gripW * 0.9);
+  ctx.lineTo(tx1 + px * headR * 0.58, ty1 + py * headR * 0.58);
+  ctx.lineTo(tx1 - px * headR * 0.58, ty1 - py * headR * 0.58);
+  ctx.lineTo(tx0 - px * gripW * 0.9,  ty0 - py * gripW * 0.9);
+  ctx.closePath(); ctx.fill();
+
+  // Grepp
+  ctx.save();
+  ctx.translate(gcx, gcy);
+  ctx.rotate(angle);
+
+  ctx.fillStyle = '#0a0a0a';
+  roundRectPath(ctx, -gripLen/2, -gripW/2, gripLen, gripW, gripW * 0.45);
+  ctx.fill();
+
+  const numBands = 8;
+  const bW = gripLen / numBands;
+  for (let i = 0; i < numBands; i++) {
+    const bx = -gripLen/2 + i * bW;
+    const rg = ctx.createLinearGradient(0, -gripW/2, 0, gripW/2);
+    rg.addColorStop(0,    '#5a0000');
+    rg.addColorStop(0.35, '#bb1100');
+    rg.addColorStop(0.65, '#ee3311');
+    rg.addColorStop(1,    '#5a0000');
+    ctx.fillStyle = rg;
+    roundRectPath(ctx, bx + 0.5, -gripW/2 + 1, bW - 1, gripW - 2, gripW * 0.3);
+    ctx.fill();
+  }
+  ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+  ctx.lineWidth   = 1.2;
+  for (let i = 1; i < numBands; i++) {
+    const lx = -gripLen/2 + i * bW;
+    ctx.beginPath(); ctx.moveTo(lx, -gripW/2 + 2); ctx.lineTo(lx, gripW/2 - 2); ctx.stroke();
+  }
+  ctx.fillStyle = '#111';
+  roundRectPath(ctx, -gripLen/2, -gripW/2, gripW * 0.6, gripW, gripW * 0.45);
+  ctx.fill();
+  ctx.restore();
+
+  // Huvud – yttre svart
+  ctx.fillStyle = '#111';
+  ctx.beginPath(); ctx.arc(hcx, hcy, headR, 0, Math.PI*2); ctx.fill();
+
+  // Huvud – inre yta med gradient
+  ctx.save();
+  ctx.beginPath(); ctx.arc(hcx, hcy, headR * 0.87, 0, Math.PI*2); ctx.clip();
+  const fg = ctx.createRadialGradient(
+    hcx - headR*0.25, hcy - headR*0.25, 0, hcx, hcy, headR);
+  fg.addColorStop(0,   '#2e2e2e');
+  fg.addColorStop(0.7, '#181818');
+  fg.addColorStop(1,   '#101010');
+  ctx.fillStyle = fg; ctx.fill();
+
+  // Vita hål
+  ctx.fillStyle = 'rgba(255,255,255,0.88)';
+  const dotR = headR * 0.068, sp = headR * 0.295;
+  for (let row = 0; row < 6; row++) {
+    for (let col = 0; col < 5; col++) {
+      const lf = (col - 2) * sp;
+      const lp = (row - 2.5) * sp;
+      const wx = hcx + cos*lf + px*lp;
+      const wy = hcy + sin*lf + py*lp;
+      const ddx = wx - hcx, ddy = wy - hcy;
+      if (ddx*ddx + ddy*ddy < (headR*0.83)*(headR*0.83)) {
+        ctx.beginPath(); ctx.arc(wx, wy, dotR, 0, Math.PI*2); ctx.fill();
+      }
+    }
+  }
+  ctx.restore();
+
+  // Konturlinje
+  ctx.strokeStyle = '#3a3a3a'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(hcx, hcy, headR, 0, Math.PI*2); ctx.stroke();
 }
 
 
